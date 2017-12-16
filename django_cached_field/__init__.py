@@ -3,15 +3,21 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 from django.utils.functional import curry
+from dateutil import relativedelta
 from django_cached_field.tasks import offload_cache_recalculation
 
-if getattr(settings, 'CACHED_FIELD_USE_TIMEZONE', False):
-    now = timezone.now
-else:
-    now = datetime.now
+now = timezone.now
 
 
 def _flag_FIELD_as_stale(self, field=None, and_recalculate=None, commit=True):
+    """
+    Mark the field as stale. Invoked by model_object.flag_<field_name>_as_stale
+    :param self: model object
+    :param field: field object
+    :param and_recalculate: boolean to trigger celery task. Uses
+    Will fall back to CACHED_FIELD_DEFAULT_EXPIRATION if not set.
+    :param commit: dateutil.relativedelta or datetime.timedelta or timedelta.
+    """
     if and_recalculate is None:
         and_recalculate = True
         if hasattr(settings, 'CACHED_FIELD_EAGER_RECALCULATION'):
@@ -27,22 +33,35 @@ def _flag_FIELD_as_stale(self, field=None, and_recalculate=None, commit=True):
     if commit:
         type(self).objects.filter(pk=self.pk).update(**kwargs)
         if and_recalculate:
-            self.trigger_cache_recalculation()
+            self.trigger_cache_recalculation(field=field)
     return kwargs
 
 
-def _expire_FIELD_after(self, when=None, field=None):
-    if when is not None and not isinstance(when, datetime):
-        when = datetime.now().replace(
-            year=when.year, month=when.month, day=when.day,
-            hour=0, minute=0, second=0, microsecond=0)
-        if getattr(settings, 'CACHED_FIELD_USE_TIMEZONE', False):
-            when = when.replace(tzinfo=timezone.utc)
-    setattr(self, field.expiration_field_name, when)
-    type(self).objects.filter(pk=self.pk).update(**{field.expiration_field_name: when})
+def _expire_FIELD_after(self, field=None, expiration=None):
+    """
+    Set the expiration time for field. Invoked by model_object.expire_<field_name>_after
+    :param self: model object
+    :param field: field object
+    :param expiration: dateutil.relativedelta or datetime.timedelta or timedelta.
+    Will fall back to CACHED_FIELD_DEFAULT_EXPIRATION if not set.
+    """
+    expiration = expiration or getattr(settings, 'CACHED_FIELD_DEFAULT_EXPIRATION')
+    if expiration is not None and not isinstance(expiration, datetime):
+        expiration = now() + expiration
+    setattr(self, field.expiration_field_name, expiration)
+    type(self).objects.filter(pk=self.pk).update(**{field.expiration_field_name: expiration})
 
 
-def _recalculate_FIELD(self, field=None, commit=True):
+def _recalculate_FIELD(self, field=None, expiration=None, commit=True):
+    """
+    Recalculate the field. Invoked by model_object.recalculate_<field_name>
+    :param self: model object
+    :param field: field object
+    :param expiration: dateutil.relativedelta or datetime.timedelta or timedelta
+    Will fall back to CACHED_FIELD_DEFAULT_EXPIRATION if not set.
+    :param commit: save to the database
+    :return: kwargs
+    """
     if commit:
         type(self).objects.filter(pk=self.pk).update(
             **{field.recalculation_needed_field_name: False})
@@ -54,9 +73,12 @@ def _recalculate_FIELD(self, field=None, commit=True):
         kwargs[field.recalculation_needed_field_name] = False
     if field.temporal_triggers:
         expires = getattr(self, field.expiration_field_name)
-        if expires and expires < now():
-            setattr(self, field.expiration_field_name, None)
-            kwargs[field.expiration_field_name] = None
+        if not expires or expires < now():
+            expiration = expiration or getattr(settings, 'CACHED_FIELD_DEFAULT_EXPIRATION')
+            if expiration is not None and not isinstance(expiration, datetime):
+                expiration = now() + expiration
+            setattr(self, field.expiration_field_name, expiration)
+            kwargs[field.expiration_field_name] = expiration
     if commit:
         type(self).objects.filter(pk=self.pk).update(**kwargs)
     else:
@@ -79,12 +101,12 @@ def _set_FIELD(self, val, field=None):
     setattr(self, field.cached_field_name, val)
 
 
-def trigger_cache_recalculation(self):
+def trigger_cache_recalculation(self, field=None):
     obj_name = self._meta.object_name
     if self._meta.proxy:
         obj_name = self._meta.proxy_for_model._meta.object_name
     offload_cache_recalculation.delay(
-        self._meta.app_label, obj_name, self.pk)
+        self._meta.app_label, obj_name, self.pk, **field.celery_async_kwargs)
 
 
 def ensure_class_has_cached_field_methods(cls):
@@ -119,6 +141,10 @@ class CachedFieldMixin(object):
       `cached_field_name' to specify a field name other than cached_FIELD
       `recalculation_needed_field_name' to specify a field name other than
         FIELD_recalculation_needed
+      `expiration_field_name' to specify a field name other than
+        FIELD_expires_after
+      `celery_async_kwargs' to specify kwargs in a dictionary as shown celery doc
+      http://docs.celeryproject.org/en/latest/userguide/calling.html#eta-and-countdown
       `temporal_triggers' to turn on expirations
     """
 
@@ -126,8 +152,11 @@ class CachedFieldMixin(object):
                  recalculation_needed_field_name=None, temporal_triggers=False,
                  db_index_on_temporal_trigger_field=False,
                  db_index_on_recalculation_needed_field=False,
-                 expiration_field_name=None, *args, **kwargs):
-        self.temporal_triggers = temporal_triggers
+                 expiration_field_name=None,
+                 celery_async_kwargs=None,
+                 *args, **kwargs):
+        self.temporal_triggers = temporal_triggers or getattr(settings, 'CACHED_FIELD_DEFAULT_EXPIRATION')
+        self.celery_async_kwargs = celery_async_kwargs or getattr(settings, 'CACHED_FIELD_CELERY_ASYNC_KWARGS')
         self.db_index_on_temporal_trigger_field = db_index_on_temporal_trigger_field
         self.db_index_on_recalculation_needed_field = db_index_on_recalculation_needed_field
         if expiration_field_name:

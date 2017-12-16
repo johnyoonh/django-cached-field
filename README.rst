@@ -50,6 +50,24 @@ this situation, you wouldn't need celery. ::
 
    CACHED_FIELD_EAGER_RECALCULATION = True  # default
 
+You can also set a default expiration time so that every recalcuation
+will trigger a timer at the end. This timer will be checked every time
+the field is evaluated. The type of this field is expected to be either:
+`dateutil.relativedelta` or `datetime.timedelta`
+If this setting is set, then the temporal_trigger attribute is set.::
+
+   from dateutil.relativedelta import relativedelta
+   CACHED_FIELD_DEFAULT_EXPIRATION = relativedelta(days=1)
+
+Celerey tasks has kwargs options to set for an async task as shonw in
+the doc. `http://docs.celeryproject.org/en/latest/userguide/calling.html#eta-and-countdown`
+This may be set with `celery_async_kwargs` argument at initialization
+and if not set, it will fall back to
+
+    CACHED_FIELD_CELERY_ASYNC_KWARGS = {
+          'countdown': 5*60 #seconds
+          }
+
 This is a global option, so individual exceptions should instead be
 handled by passing the ``and_recalculate`` argument to the
 ``flag_FIELD_as_stale`` call.
