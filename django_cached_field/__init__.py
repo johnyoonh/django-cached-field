@@ -169,6 +169,7 @@ class CachedFieldMixin(object):
             self._recalculation_needed_field_name = recalculation_needed_field_name
         self.init_args_for_field = args
         self.init_kwargs_for_field = kwargs
+        super(CachedFieldMixin, self).__init__(*args, **kwargs)
 
     def contribute_to_class(self, cls, name):
         ensure_class_has_cached_field_methods(cls)
