@@ -196,7 +196,7 @@ class CachedFieldMixin(object):
                     'expire_{}_after'.format(self.name),
                     curry(cls._expire_FIELD_after, field=self))
             expire_field = models.DateTimeField(
-                null=True, db_index=self.db_index_on_temporal_trigger_field)
+                null=True, db_index=self.db_index_on_temporal_trigger_field, blank=True)
             setattr(cls, self.expiration_field_name, expire_field)
             expire_field.contribute_to_class(cls, self.expiration_field_name)
 
